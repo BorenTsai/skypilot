@@ -1,9 +1,11 @@
 import pathlib
 import textwrap
+from unittest import mock
 
 import pytest
 
 from sky.exceptions import InvalidSkyPilotConfigError
+from sky.resources import ResourceAlias
 from sky.task import Task
 
 
@@ -70,7 +72,7 @@ def test_empty_fields_resources(tmp_path):
     assert resources.cpus == '32'
 
 
-def test_gpu_resources(tmp_path):
+def test_resolve_gpu_resource_alias(tmp_path):
     config_path = _create_config_file(
         textwrap.dedent("""\
             resources:
@@ -82,7 +84,7 @@ def test_gpu_resources(tmp_path):
     assert resources.accelerators == {'V100': 1}
 
 
-def test_both_gpus_and_accelerators_raises_config_error(tmp_path):
+def test_both_gpus_alias_and_accelerators_config_raises_error(tmp_path):
     """Aliased and canonical names cannot both be specified in config."""
     config_path = _create_config_file(
         textwrap.dedent("""\
@@ -94,7 +96,31 @@ def test_both_gpus_and_accelerators_raises_config_error(tmp_path):
     with pytest.raises(InvalidSkyPilotConfigError) as e:
         Task.from_yaml(config_path)
     assert e.value.args[
-        0] == "Cannot specify both gpus and accelerators in config."
+        0] == "Cannot specify both ('gpus',) and ('accelerators',) in config."
+
+
+def test_nested_aliases(tmp_path):
+    """Validate nested aliases can be resolved."""
+    mock_aliases = mock.patch('sky.resources.RESOURCE_CONFIG_ALIASES', [
+        ResourceAlias(('job_recovery', 'tactic'), ('job_recovery', 'strategy'))
+    ])
+    mock_aliases.start()
+
+    config_path = _create_config_file(
+        textwrap.dedent("""\
+            resources:
+                job_recovery:
+                    tactic: FAILOVER
+            """), tmp_path)
+
+    task = Task.from_yaml(config_path)
+    resources = list(task.resources)[0]
+    job_recovery = resources.job_recovery
+    assert isinstance(job_recovery, dict)
+    assert job_recovery.get('tactic') is None
+    assert job_recovery.get('strategy') == "FAILOVER"
+
+    mock_aliases.stop()
 
 
 def test_invalid_fields_resources(tmp_path):

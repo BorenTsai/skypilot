@@ -18,6 +18,7 @@ from sky.skylet import constants
 from sky.utils import accelerator_registry
 from sky.utils import annotations
 from sky.utils import common_utils
+from sky.utils import config_utils
 from sky.utils import log_utils
 from sky.utils import registry
 from sky.utils import resources_utils
@@ -28,9 +29,32 @@ logger = sky_logging.init_logger(__name__)
 
 _DEFAULT_DISK_SIZE_GB = 256
 
-RESOURCE_CONFIG_ALIASES = {
-    'gpus': 'accelerators',
-}
+
+class ResourceAlias:
+    """ResourceAlias: Internal representation of resource aliases.
+
+    This class is used to map between different resource names and their
+    canonical names. For example, 'gpus' is an alias for 'accelerators'.
+    Each instance should be added to the RESOURCE_CONFIG_ALIASES constant.
+    """
+
+    def __init__(self, alias_path: Tuple[str, ...], canonical_path: Tuple[str,
+                                                                          ...]):
+        self._alias_path = alias_path
+        self._canonical_path = canonical_path
+
+    @property
+    def alias_path(self):
+        return self._alias_path
+
+    @property
+    def canonical_path(self):
+        return self._canonical_path
+
+
+RESOURCE_CONFIG_ALIASES: List[ResourceAlias] = [
+    ResourceAlias(alias_path=('gpus',), canonical_path=('accelerators',)),
+]
 
 
 class Resources:
@@ -1354,21 +1378,29 @@ class Resources:
         return features
 
     @staticmethod
-    def apply_resource_config_aliases(
+    def resolve_resource_config_aliases(
             config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Mutatively applies overriding aliases to the passed in config."""
+        """Resolves and applies aliases to config."""
         if not config:
             return config
 
-        for alias, canonical in RESOURCE_CONFIG_ALIASES.items():
-            if alias in config:
-                if canonical in config:
+        sky_config = config_utils.Config.from_dict(config)
+        for resource_alias in RESOURCE_CONFIG_ALIASES:
+            # Pop such that the alias value is removed from the config.
+            # This avoids violating the resource config schema.
+            alias_value = sky_config.pop_nested(resource_alias.alias_path, {})
+            if alias_value:
+                canonical_value = sky_config.get_nested(
+                    resource_alias.canonical_path, {})
+                if alias_value and canonical_value:
                     raise exceptions.InvalidSkyPilotConfigError(
-                        f'Cannot specify both {alias} '
-                        f'and {canonical} in config.')
-                config[canonical] = config[alias]
-                del config[alias]
-        return config
+                        f'Cannot specify both {resource_alias.alias_path} '
+                        f'and {resource_alias.canonical_path} in config.')
+
+                sky_config.set_nested(resource_alias.canonical_path,
+                                      alias_value)
+
+        return sky_config
 
     @classmethod
     def from_yaml_config(
@@ -1377,7 +1409,7 @@ class Resources:
         if config is None:
             return {Resources()}
 
-        Resources.apply_resource_config_aliases(config)
+        config = Resources.resolve_resource_config_aliases(config)
         common_utils.validate_schema(config, schemas.get_resources_schema(),
                                      'Invalid resources YAML: ')
 
